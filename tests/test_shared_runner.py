@@ -4,6 +4,9 @@ import hashlib
 import importlib.util
 import json
 import os
+import secrets
+import shutil
+import sys
 from pathlib import Path
 import plistlib
 import subprocess
@@ -81,6 +84,42 @@ class ManagedSigningTest(unittest.TestCase):
                 with patch.dict(os.environ,env), patch.object(installer.subprocess,'check_output',side_effect=[certificate,plistlib.dumps(contents)]), patch.object(installer.subprocess,'run') as calls:
                     with self.assertRaisesRegex(ValueError,'does not match'): installer.main()
                     calls.assert_not_called()
+
+
+class KeychainArchiveCompatibilityTest(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == 'darwin' and shutil.which('openssl'), 'requires macOS security importer')
+    def test_archive_imports_into_real_macos_keychain(self):
+        installer = module('install_managed_signing')
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder); key = root / 'key.pem'; cert = root / 'cert.pem'; archive = root / 'identity.p12'
+            subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-subj', '/CN=Deploy Import Test',
+                            '-days', '1', '-keyout', str(key), '-out', str(cert)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+            password = installer.export_keychain_archive(key, cert, archive)
+            self.assertGreater(len(password.read_text()), 0)
+            self.assertEqual(password.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(archive.stat().st_mode & 0o777, 0o600)
+            keychain = root / 'test.keychain-db'
+            subprocess.run(['security', 'create-keychain', '-p', secrets.token_hex(16), str(keychain)], check=True)
+            try:
+                subprocess.run(['security', 'import', str(archive), '-k', str(keychain), '-P', password.read_text(), '-T', '/usr/bin/codesign'], check=True, stdout=subprocess.DEVNULL)
+            finally:
+                subprocess.run(['security', 'delete-keychain', str(keychain)], check=True)
+
+    def test_import_password_is_a_file_reference_and_removed_on_failure(self):
+        installer = module('install_managed_signing')
+        der = b'certificate-der'
+        contents = {'Entitlements': {'application-identifier': 'TEAM.com.example'}, 'DeveloperCertificates': [der]}
+        with tempfile.TemporaryDirectory() as folder:
+            env = {'APTEVA_BUILD_DIR': folder, 'CERTIFICATE_PRIVATE_KEY': 'test-key', 'APTEVA_CERTIFICATE_PEM': 'test-cert',
+                   'APTEVA_PROVISIONING_PROFILE_BASE64': base64.b64encode(b'profile').decode(),
+                   'APTEVA_APPLE_CERT_SHA256': hashlib.sha256(der).hexdigest(), 'APTEVA_BUNDLE_ID': 'com.example'}
+            password = Path(folder) / 'certificate.password'; password.write_text('test-password')
+            with patch.dict(os.environ, env), patch.object(installer.subprocess, 'check_output', side_effect=[der, plistlib.dumps(contents)]), patch.object(installer, 'export_keychain_archive', return_value=password), patch.object(installer.subprocess, 'run', side_effect=subprocess.CalledProcessError(1, ['keychain'])) as execute:
+                with self.assertRaises(subprocess.CalledProcessError): installer.main()
+                command = execute.call_args[0][0]
+                self.assertIn('@file:' + str(password), command)
+                self.assertNotIn('test-password', command)
+                self.assertFalse(password.exists())
 
 class GeneratorProvisioningTest(unittest.TestCase):
     def test_apple_preparation_receives_xcodegen_before_recipe_execution(self):
