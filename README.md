@@ -42,8 +42,8 @@ place. `APTEVA_SOURCE_BUILD_SUBDIR`, when supplied, must match the build spec.
 Recipes supply argument arrays, directories, environment values, timeouts and
 outputs; no engine or game logic belongs in this repository.
 
-For a pipeline, the bootstrap downloads checksum-pinned Darwin Deploy runner
-binaries from `deploy/v0.28.0`. `--cloud-pipeline prepare`, `finalize` and
+For a pipeline, the bootstrap downloads checksum-pinned macOS/Linux Deploy runner
+binaries from `deploy/v0.29.0`. `--cloud-pipeline prepare`, `finalize` and
 `verify` share Deploy's local `buildWithPipeline` execution, tree hashing and
 evidence validation. Native archive/sign/export runs inside
 `pipeline.build_directory`; `DEPLOY_SOURCE_DIR` remains the app source root
@@ -77,3 +77,28 @@ clearly. Jobs without a pipeline retain the existing native packaging path.
 workflow regressions. To run these from the adapter repository, set
 `TEST_DEPLOY_PIPELINE_RUNNER` to a compiled Deploy binary and run
 `python3 -B -m unittest discover -s tests -v`.
+
+## Bitrise and Appcircle (Deploy 0.29.0)
+
+`bitrise.yml` and `appcircle/README.md` select the same
+`scripts/run_mobile.py` runner. Its stages are generated from the maintained
+native workflow with `python3 scripts/generate_mobile_steps.py` (development
+requires PyYAML). Provider scripts do not contain game/engine recipes.
+
+Use a macOS worker for iOS/macOS, or a Linux/macOS worker for Android. The
+pipeline helper is downloaded from Deploy's release assets with a SHA-256 pin
+for each OS/architecture. XcodeGen 2.46.0 is installed and verified **before**
+Apple recipe preparation, so export commands can generate their own projects.
+Requested toolchain versions are checked before preparation.
+
+Bitrise receives signing material through masked build secrets. Appcircle uses
+an attached secret variable group created by Deploy's mobile signing setup.
+Apple signing imports the exact managed certificate/profile and validates the
+bundle ID and certificate fingerprint before touching the keychain. Disable
+provider automatic signing and publishing. Run final artifact tests before
+packaging or upload; only the verified named artifact archive is exported.
+Signing files and App Store upload keys are cleaned even after a failed stage.
+
+Bind both provider accounts to Deploy's multiple `cloud_build` integration role,
+then choose the backend and `connection_id` per environment. Source recipes,
+reserved versions, managed identities and attestation checks are shared.

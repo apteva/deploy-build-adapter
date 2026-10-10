@@ -26,7 +26,7 @@ def download(url, path):
 
 
 def emit(values):
-    with open(os.environ['CM_ENV'], 'a') as env_file:
+    with open((os.environ.get('APTEVA_ENV_FILE') or os.environ['CM_ENV']), 'a') as env_file:
         for key, value in values.items():
             if '\n' in str(value) or '\r' in str(value):
                 raise ValueError(f'{key} contains a newline')
@@ -61,14 +61,45 @@ def exact_version(value, tool):
     return value
 
 
+def provision_xcodegen(requested, tools, env):
+    version = requested.get('xcodegen', '2.46.0')
+    if version != '2.46.0':
+        raise ValueError('unsupported pinned XcodeGen version: ' + version)
+    expected = '4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806'
+    archive = tools / 'xcodegen.zip'
+    download(f'https://github.com/yonaskolb/XcodeGen/releases/download/{version}/xcodegen.zip', archive)
+    if hashlib.sha256(archive.read_bytes()).hexdigest() != expected:
+        raise ValueError('XcodeGen installation failed: checksum mismatch')
+    destination = tools / 'xcodegen'
+    destination.mkdir(exist_ok=True)
+    with zipfile.ZipFile(archive) as z:
+        for entry in z.infolist():
+            target = (destination / entry.filename).resolve()
+            target.relative_to(destination.resolve())
+            if entry.is_dir(): target.mkdir(parents=True, exist_ok=True)
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(z.read(entry))
+    binary = destination / 'xcodegen/bin/xcodegen'
+    if not binary.is_file(): raise ValueError('XcodeGen installation failed: binary missing')
+    binary.chmod(0o755)
+    actual = run([str(binary), '--version'])
+    if actual.split()[-1] != version: raise ValueError('XcodeGen version mismatch: ' + actual)
+    print(f'XcodeGen {version}', flush=True)
+    return {'PATH': str(binary.parent) + ':' + env['PATH']}
+
+
 def provision(spec, capsule, tools):
     requested = spec.get('software_versions') or {}
-    supported = {'bun', 'rust', 'rust_targets', 'xcode', 'node', 'python', 'cocoapods', 'java', 'ruby', 'flutter'}
+    supported = {'bun', 'rust', 'rust_targets', 'xcode', 'node', 'python', 'cocoapods', 'java', 'ruby', 'flutter', 'xcodegen'}
     unknown = set(requested) - supported
     if unknown:
         raise ValueError('unsupported requested runner versions: ' + ', '.join(sorted(unknown)))
     env = dict(os.environ)
     changed = {}
+    if spec.get('target_kind') in {'ios', 'macos'} or requested.get('xcodegen'):
+        changed.update(provision_xcodegen(requested, tools, env))
+        env.update(changed)
     package_files = source_files(capsule, 'package.json')
     package_managers = set()
     for file in package_files:
@@ -81,7 +112,7 @@ def provision(spec, capsule, tools):
             raise ValueError('conflicting Bun versions in capsule; configure software_versions.bun')
         version = exact_version(requested.get('bun') or next(iter(package_managers), '1.3.13'), 'Bun')
         arch = {'arm64': 'aarch64', 'x86_64': 'x64'}[platform.machine()]
-        bundle = f'bun-darwin-{arch}'
+        bundle = f'bun-{platform.system().lower()}-{arch}'
         archive = tools / 'bun.zip'
         download(f'https://github.com/oven-sh/bun/releases/download/bun-v{version}/{bundle}.zip', archive)
         with zipfile.ZipFile(archive) as z:
@@ -162,24 +193,24 @@ def main():
     capsule = Path(os.environ['APTEVA_CAPSULE_DIR']).resolve(strict=True)
     app = capsule_app(capsule, subdir)
     pipeline = json.loads(spec.get('target_config_json') or '{}').get('pipeline')
-    output = Path(os.environ['CM_BUILD_DIR']) / 'apteva-output'
+    output = Path((os.environ.get('APTEVA_BUILD_DIR') or os.environ['CM_BUILD_DIR'])) / 'apteva-output'
     output.mkdir(exist_ok=True)
     if pipeline is None:
         ext = {'ios': 'ipa', 'macos': 'pkg', 'android': 'aab'}[spec['target_kind']]
         emit({'APTEVA_SOURCE_DIR': app, 'APTEVA_NATIVE_BUILD_DIR': app, 'APTEVA_OUTPUT_PRIMARY': 'app.' + ext})
         return
-    tools = Path(os.environ['CM_BUILD_DIR']) / 'apteva-tools' / 'pipeline'
+    tools = Path((os.environ.get('APTEVA_BUILD_DIR') or os.environ['CM_BUILD_DIR'])) / 'apteva-tools' / 'pipeline'
     tools.mkdir(parents=True, exist_ok=True)
     pins = json.loads((Path(__file__).parent / 'pipeline-runner.json').read_text())
     arch = {'arm64': 'arm64', 'x86_64': 'amd64'}[platform.machine()]
-    pin = pins['darwin-' + arch]
+    pin = pins[platform.system().lower() + '-' + arch]
     runner = tools / 'deploy-pipeline'
     download(pin['url'], runner)
     if hashlib.sha256(runner.read_bytes()).hexdigest() != pin['sha256']:
         raise ValueError('Deploy pipeline runner checksum mismatch')
     runner.chmod(0o755)
     env = provision(spec, capsule, tools)
-    subprocess.run([str(runner), '--cloud-pipeline', 'prepare', '--source', str(capsule), '--artifact', str(output), '--env-file', os.environ['CM_ENV']], env=env, check=True)
+    subprocess.run([str(runner), '--cloud-pipeline', 'prepare', '--source', str(capsule), '--artifact', str(output), '--env-file', (os.environ.get('APTEVA_ENV_FILE') or os.environ['CM_ENV'])], env=env, check=True)
     emit({'APTEVA_PIPELINE_RUNNER': runner})
 
 
