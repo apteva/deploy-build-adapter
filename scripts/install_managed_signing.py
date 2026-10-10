@@ -4,7 +4,26 @@ import hashlib
 import os
 from pathlib import Path
 import plistlib
+import secrets
 import subprocess
+
+
+def export_keychain_archive(key, certificate, archive):
+    # Apple's security importer requires a nonempty password and the PKCS#12
+    # algorithms it supports, rather than OpenSSL 3's AES/SHA256 defaults.
+    password = archive.with_suffix('.password')
+    password.write_text(secrets.token_urlsafe(32))
+    password.chmod(0o600)
+    try:
+        subprocess.run(['openssl', 'pkcs12', '-export', '-inkey', str(key), '-in', str(certificate),
+                        '-out', str(archive), '-passout', 'file:' + str(password),
+                        '-keypbe', 'PBE-SHA1-3DES', '-certpbe', 'PBE-SHA1-3DES', '-macalg', 'sha1'], check=True)
+        archive.chmod(0o600)
+    except BaseException:
+        password.unlink(missing_ok=True)
+        archive.unlink(missing_ok=True)
+        raise
+    return password
 
 
 def main():
@@ -34,10 +53,13 @@ def main():
     bundle = os.environ['APTEVA_BUNDLE_ID']
     if not identifier.endswith('.' + bundle) or der not in contents.get('DeveloperCertificates', []):
         raise ValueError('managed provisioning profile does not match the bundle and certificate')
-    subprocess.run(['openssl', 'pkcs12', '-export', '-inkey', str(key), '-in', str(certificate),
-                    '-out', str(p12), '-passout', 'pass:'], check=True)
-    p12.chmod(0o600)
-    subprocess.run(['keychain', 'add-certificates', '--certificate', str(p12)], check=True)
+    password = export_keychain_archive(key, certificate, p12)
+    try:
+        subprocess.run(['keychain', 'add-certificates', '--certificate', str(p12),
+                        '--certificate-password', '@file:' + str(password)], check=True)
+    finally:
+        password.unlink(missing_ok=True)
+
 
 
 if __name__ == '__main__':
