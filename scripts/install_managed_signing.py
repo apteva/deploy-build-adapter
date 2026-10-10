@@ -1,11 +1,13 @@
 """Install the exact certificate/profile supplied by Deploy; never create an identity."""
 import base64
 import hashlib
+import json
 import os
 from pathlib import Path
 import plistlib
 import secrets
 import subprocess
+import uuid
 
 
 def export_keychain_archive(key, certificate, archive):
@@ -24,6 +26,30 @@ def export_keychain_archive(key, certificate, archive):
         archive.unlink(missing_ok=True)
         raise
     return password
+
+
+def install_provisioning_profile(profile, contents, platform, home=None):
+    identifier = str(uuid.UUID(contents.get('UUID', '')))
+    home = Path.home() if home is None else home
+    extension = '.provisionprofile' if platform == 'macos' else '.mobileprovision'
+    created = []
+    marker = profile.parent / 'installed-profile-files.json'
+    for location in (home / 'Library/Developer/Xcode/UserData/Provisioning Profiles',
+                     home / 'Library/MobileDevice/Provisioning Profiles'):
+        location.mkdir(parents=True, mode=0o700, exist_ok=True)
+        destination = location / (identifier + extension)
+        try:
+            with destination.open('xb') as output:
+                output.write(profile.read_bytes())
+            destination.chmod(0o600)
+        except FileExistsError:
+            if destination.read_bytes() != profile.read_bytes():
+                raise ValueError('installed provisioning profile UUID has different contents')
+            continue
+        created.append(str(destination))
+        marker.write_text(json.dumps(created))
+        marker.chmod(0o600)
+    return created
 
 
 def main():
@@ -57,6 +83,7 @@ def main():
     try:
         subprocess.run(['keychain', 'add-certificates', '--certificate', str(p12),
                         '--certificate-password', '@file:' + str(password)], check=True)
+        install_provisioning_profile(profile, contents, os.environ.get('APTEVA_TARGET_KIND', 'ios'))
     finally:
         password.unlink(missing_ok=True)
 

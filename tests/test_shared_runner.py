@@ -51,6 +51,18 @@ class SharedRunnerTest(unittest.TestCase):
             self.assertFalse((root / 'apteva-signing').exists())
             self.assertFalse((root / '.apteva-env').exists())
 
+
+    def test_invalid_profile_cleanup_still_removes_private_signing_files(self):
+        runner = module('run_mobile')
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder); (root / 'scripts').mkdir(); (root / 'scripts/mobile_steps.json').write_text('[]')
+            signing = root / 'apteva-signing'; signing.mkdir(); (signing / 'key.pem').write_text('private-key')
+            (signing / 'installed-profile-files.json').write_text(json.dumps(['/unrelated/profile.mobileprovision']))
+            (root / '.apteva-env').write_text('secret')
+            with patch.object(runner, 'ROOT', root), patch.dict(os.environ, {'APTEVA_TARGET_KIND':'android'}):
+                with self.assertRaisesRegex(ValueError, 'cleanup path'): runner.main()
+            self.assertFalse(signing.exists()); self.assertFalse((root / '.apteva-env').exists())
+
     def test_appcircle_exports_only_the_named_verified_archive(self):
         runner = module('run_mobile')
         with tempfile.TemporaryDirectory() as folder:
@@ -120,6 +132,30 @@ class KeychainArchiveCompatibilityTest(unittest.TestCase):
                 self.assertIn('@file:' + str(password), command)
                 self.assertNotIn('test-password', command)
                 self.assertFalse(password.exists())
+
+
+class ProvisioningProfileInstallationTest(unittest.TestCase):
+    def test_profiles_are_installed_for_current_and_older_xcode_and_only_owned_files_removed(self):
+        installer = module('install_managed_signing'); runner = module('run_mobile')
+        for platform, suffix in (('ios', '.mobileprovision'), ('macos', '.provisionprofile')):
+            with self.subTest(platform=platform), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder); signing = root / 'signing'; signing.mkdir(); profile = signing / 'profile.mobileprovision'; profile.write_bytes(b'profile')
+                home = root / 'home'; identifier = '40076afb-ecbc-4df8-a2e1-2ff2391e312a'
+                existing = home / 'Library/MobileDevice/Provisioning Profiles' / (identifier + suffix)
+                existing.parent.mkdir(parents=True); existing.write_bytes(profile.read_bytes())
+                unrelated = existing.with_name('unrelated' + suffix); unrelated.write_bytes(b'other-profile')
+                created = installer.install_provisioning_profile(profile, {'UUID':identifier}, platform, home)
+                self.assertEqual(len(created), 1)
+                installed = Path(created[0]); self.assertEqual(installed.read_bytes(), b'profile'); self.assertEqual(installed.stat().st_mode & 0o777, 0o600)
+                runner.cleanup_profiles(signing, home)
+                self.assertFalse(installed.exists()); self.assertTrue(existing.exists()); self.assertEqual(unrelated.read_bytes(), b'other-profile')
+
+    def test_invalid_profile_uuid_never_writes_to_xcode_cache(self):
+        installer = module('install_managed_signing')
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder); profile = root / 'profile'; profile.write_bytes(b'profile')
+            with self.assertRaises(ValueError): installer.install_provisioning_profile(profile, {'UUID':'../../unrelated'}, 'ios', root / 'home')
+            self.assertFalse((root / 'home').exists())
 
 class GeneratorProvisioningTest(unittest.TestCase):
     def test_apple_preparation_receives_xcodegen_before_recipe_execution(self):
