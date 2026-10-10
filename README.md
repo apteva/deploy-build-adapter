@@ -102,3 +102,14 @@ Signing files and App Store upload keys are cleaned even after a failed stage.
 Bind both provider accounts to Deploy's multiple `cloud_build` integration role,
 then choose the backend and `connection_id` per environment. Source recipes,
 reserved versions, managed identities and attestation checks are shared.
+
+## GitHub Actions
+
+The same native runner is available at `.github/workflows/apteva-mobile-capsule.yml`.
+Configure Deploy with `owner`, `repo`, `workflow_id: apteva-mobile-capsule.yml`,
+`ref: main`, `source_mode: bundle`, and `contract_input: apteva_contract`.
+Deploy provisions encrypted, scoped repository secrets using the selected GitHub
+connection (repository Actions secrets write permission is required). The workflow
+receives only the public build contract and secret-name prefix as dispatch inputs.
+Signing remains owned by Deploy and the selected Apple/Google integration.
+The shared pipeline builds and validates the final artifact on all providers.
